@@ -45,7 +45,7 @@ def image_stream(imagedir, calib, stride):
         h0, w0, _ = image.shape
         h1 = int(h0 * np.sqrt((384 * 512) / (h0 * w0)))
         w1 = int(w0 * np.sqrt((384 * 512) / (h0 * w0)))
-
+        
         image = cv2.resize(image, (w1, h1))
         image = image[:h1-h1%8, :w1-w1%8]
         image = torch.as_tensor(image).permute(2, 0, 1)
@@ -81,19 +81,19 @@ if __name__ == '__main__':
     parser.add_argument("--imagedir", type=str, help="path to image directory")
     parser.add_argument("--calib", type=str, help="path to calibration file")
     parser.add_argument("--t0", default=0, type=int, help="starting frame")
-    parser.add_argument("--stride", default=3, type=int, help="frame stride")
+    parser.add_argument("--stride", default=1, type=int, help="frame stride")
 
     parser.add_argument("--weights", default="droid.pth")
     parser.add_argument("--buffer", type=int, default=512)
-    parser.add_argument("--image_size", default=[240, 320])
+    parser.add_argument("--image_size", default=[1080, 1920])
     parser.add_argument("--disable_vis", action="store_true")
 
     parser.add_argument("--beta", type=float, default=0.3, help="weight for translation / rotation components of flow")
     parser.add_argument("--filter_thresh", type=float, default=2.4, help="how much motion before considering new keyframe")
     parser.add_argument("--warmup", type=int, default=8, help="number of warmup frames")
     parser.add_argument("--keyframe_thresh", type=float, default=4.0, help="threshold to create a new keyframe")
-    parser.add_argument("--frontend_thresh", type=float, default=16.0, help="add edges between frames whithin this distance")
-    parser.add_argument("--frontend_window", type=int, default=25, help="frontend optimization window")
+    parser.add_argument("--frontend_thresh", type=float, default=32.0, help="add edges between frames whithin this distance")
+    parser.add_argument("--frontend_window", type=int, default=50, help="frontend optimization window")
     parser.add_argument("--frontend_radius", type=int, default=2, help="force edges between frames within radius")
     parser.add_argument("--frontend_nms", type=int, default=1, help="non-maximal supression of edges")
 
@@ -117,6 +117,17 @@ if __name__ == '__main__':
     if args.reconstruction_path is not None:
         args.upsample = True
 
+    
+    # --- PERFORMANCE METRICS INITIALIZATION ---
+    frame_count = 0
+    start_time = time.time()
+    
+    if torch.cuda.is_available():
+        # Reset peak memory stats to get a clean measurement for this run
+        torch.cuda.reset_peak_memory_stats()
+    # ------------------------------------------
+    
+    
     tstamps = []
     for (t, image, intrinsics) in tqdm(image_stream(args.imagedir, args.calib, args.stride)):
         if t < args.t0:
@@ -130,8 +141,30 @@ if __name__ == '__main__':
             droid = DroidAsync(args) if args.asynchronous else Droid(args)
         
         droid.track(t, image, intrinsics=intrinsics)
+        frame_count += 1 # <--- INCREMENT FRAME COUNT
 
-    traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride))
+    # traj_est = droid.terminate(image_stream(args.imagedir, args.calib, args.stride))
+    
+    
+    # --- PERFORMANCE METRICS CALCULATION AND REPORTING ---
+    total_time = time.time() - start_time
+    average_fps = frame_count / total_time if total_time > 0 else 0.0
+    
+    peak_gpu_mem_gb = 0.0
+    if torch.cuda.is_available():
+        peak_gpu_mem_bytes = torch.cuda.max_memory_allocated()
+        # Convert bytes to Gigabytes (1024^3)
+        peak_gpu_mem_gb = peak_gpu_mem_bytes / (1024**3)
+
+    print("\n\n--- DROID-SLAM Performance Metrics ---")
+    print(f"Total Frames Processed: {frame_count}")
+    print(f"Total Tracking Time (excluding init): {total_time:.2f} s")
+    print(f"Average FPS: **{average_fps:.2f}**")
+    if torch.cuda.is_available():
+        print(f"Peak GPU Memory Allocated: **{peak_gpu_mem_gb:.3f} GB**")
+    print("--------------------------------------")
+    # -----------------------------------------------------
+    
     
     if args.reconstruction_path is not None:
         save_reconstruction(droid, args.reconstruction_path)
